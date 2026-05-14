@@ -1,5 +1,7 @@
 require('dotenv').config();
 
+const express = require('express');
+
 const {
   Client,
   GatewayIntentBits,
@@ -24,7 +26,6 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
 function parseDuration(duration) {
   const match = duration.match(/^(\d+)(m|h|d)$/i);
-
   if (!match) return null;
 
   const amount = Number(match[1]);
@@ -309,3 +310,17 @@ client.on(Events.InteractionCreate, async interaction => {
 
 deployCommands();
 client.login(process.env.TOKEN);
+
+// RENDER KEEP ALIVE SERVER
+
+const app = express();
+
+app.get('/', (req, res) => {
+  res.send('NTE Giveaway bot aktif!');
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Web server ${PORT} portunda çalışıyor.`);
+});
