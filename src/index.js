@@ -187,15 +187,13 @@ async function deployCommands() {
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
-client.once(Events.ClientReady, () => {
-  client.user.setPresence({
-    activities: [{
-      name: '🎉 Hosting NTE giveaways',
-      type: 0
-    }],
-    status: 'online'
-  });
-
+client.user.setPresence({
+  activities: [{
+    name: '🎉 Managing giveaways & rewards',
+    type: 0
+  }],
+  status: 'online'
+});
   const db = loadDB();
 
   for (const messageId of Object.keys(db.giveaways)) {
