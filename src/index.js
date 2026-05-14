@@ -1,6 +1,8 @@
 require('dotenv').config();
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 const {
   Client,
@@ -20,39 +22,73 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const giveaways = new Map();
+const dbPath = path.join(__dirname, '..', 'database.json');
+const timers = new Map();
 
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+function loadDB() {
+  if (!fs.existsSync(dbPath)) {
+    fs.writeFileSync(dbPath, JSON.stringify({ giveaways: {} }, null, 2));
+  }
 
-function parseDuration(duration) {
-  const match = duration.match(/^(\d+)(m|h|d)$/i);
-  if (!match) return null;
-
-  const amount = Number(match[1]);
-  const type = match[2].toLowerCase();
-
-  if (type === 'm') return amount * 60 * 1000;
-  if (type === 'h') return amount * 60 * 60 * 1000;
-  if (type === 'd') return amount * 24 * 60 * 60 * 1000;
-
-  return null;
+  return JSON.parse(fs.readFileSync(dbPath, 'utf8'));
 }
 
-function formatDuration(duration) {
-  return duration
-    .replace('m', ' dakika')
-    .replace('h', ' saat')
-    .replace('d', ' gün');
+function saveDB(db) {
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
 }
 
-function createGiveawayEmbed({ prize, winnersCount, duration, participantsCount, ended = false }) {
+function parseDuration(input) {
+  const regex = /(\d+)(d|h|m|s)/gi;
+  let total = 0;
+  let match;
+  let matchedText = '';
+
+  while ((match = regex.exec(input)) !== null) {
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+
+    matchedText += match[0];
+
+    if (unit === 'd') total += amount * 24 * 60 * 60 * 1000;
+    if (unit === 'h') total += amount * 60 * 60 * 1000;
+    if (unit === 'm') total += amount * 60 * 1000;
+    if (unit === 's') total += amount * 1000;
+  }
+
+  if (matchedText.toLowerCase() !== input.toLowerCase()) return null;
+  if (total <= 0) return null;
+
+  return total;
+}
+
+function formatDuration(ms) {
+  const seconds = Math.floor(ms / 1000);
+
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+
+  const parts = [];
+
+  if (d) parts.push(`${d} gün`);
+  if (h) parts.push(`${h} saat`);
+  if (m) parts.push(`${m} dakika`);
+  if (s) parts.push(`${s} saniye`);
+
+  return parts.join(' ') || '0 saniye';
+}
+
+function createGiveawayEmbed(giveaway, ended = false) {
+  const remaining = Math.max(giveaway.endTime - Date.now(), 0);
+
   return new EmbedBuilder()
     .setTitle(ended ? '🎉 Çekiliş Sona Erdi!' : '🎉 NTE Türkiye Çekilişi!')
     .setDescription(
-      `🎁 **Ödül:** ${prize}\n\n` +
-      `👑 **Kazanan Sayısı:** ${winnersCount}\n\n` +
-      `⏳ **Süre:** ${formatDuration(duration)}\n\n` +
-      `👥 **Katılımcı:** ${participantsCount}\n\n` +
+      `🎁 **Ödül:** ${giveaway.prize}\n\n` +
+      `👑 **Kazanan Sayısı:** ${giveaway.winnersCount}\n\n` +
+      `⏳ **Kalan Süre:** ${ended ? 'Bitti' : formatDuration(remaining)}\n\n` +
+      `👥 **Katılımcı:** ${giveaway.participants.length}\n\n` +
       (ended ? 'Çekiliş tamamlandı.' : 'Katılmak için aşağıdaki butona bas!')
     )
     .setColor(ended ? 'Green' : 'Purple')
@@ -61,8 +97,77 @@ function createGiveawayEmbed({ prize, winnersCount, duration, participantsCount,
 }
 
 function pickWinners(participants, count) {
-  const shuffled = [...participants].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count);
+  return [...participants].sort(() => Math.random() - 0.5).slice(0, count);
+}
+
+async function endGiveaway(messageId) {
+  const db = loadDB();
+  const giveaway = db.giveaways[messageId];
+
+  if (!giveaway || giveaway.ended) return;
+
+  giveaway.ended = true;
+
+  const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
+  if (!channel) return;
+
+  const message = await channel.messages.fetch(messageId).catch(() => null);
+
+  const disabledButton = new ButtonBuilder()
+    .setCustomId('join_giveaway')
+    .setLabel('Çekiliş Bitti')
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(true);
+
+  const row = new ActionRowBuilder().addComponents(disabledButton);
+
+  if (message) {
+    await message.edit({
+      embeds: [createGiveawayEmbed(giveaway, true)],
+      components: [row]
+    }).catch(() => {});
+  }
+
+  if (giveaway.participants.length === 0) {
+    await channel.send(`❌ **${giveaway.prize}** çekilişine kimse katılmadı.`);
+    saveDB(db);
+    return;
+  }
+
+  const winners = pickWinners(giveaway.participants, giveaway.winnersCount);
+  giveaway.winners = winners;
+
+  await channel.send(
+    `🎉 **Çekiliş Bitti!**\n\n` +
+    `🎁 Ödül: **${giveaway.prize}**\n` +
+    `👑 Kazananlar: ${winners.map(id => `<@${id}>`).join(', ')}`
+  );
+
+  saveDB(db);
+}
+
+function scheduleGiveaway(messageId) {
+  const db = loadDB();
+  const giveaway = db.giveaways[messageId];
+
+  if (!giveaway || giveaway.ended) return;
+
+  const remaining = giveaway.endTime - Date.now();
+
+  if (remaining <= 0) {
+    endGiveaway(messageId);
+    return;
+  }
+
+  if (timers.has(messageId)) {
+    clearTimeout(timers.get(messageId));
+  }
+
+  const timer = setTimeout(() => {
+    endGiveaway(messageId);
+  }, remaining);
+
+  timers.set(messageId, timer);
 }
 
 async function deployCommands() {
@@ -70,10 +175,7 @@ async function deployCommands() {
     console.log('Slash komutları yükleniyor...');
 
     await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
-      ),
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
       { body: commands }
     );
 
@@ -83,8 +185,9 @@ async function deployCommands() {
   }
 }
 
-client.once(Events.ClientReady, () => {
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
+client.once(Events.ClientReady, () => {
   client.user.setPresence({
     activities: [{
       name: '🎉 Hosting NTE giveaways',
@@ -93,8 +196,13 @@ client.once(Events.ClientReady, () => {
     status: 'online'
   });
 
-  console.log(`${client.user.tag} aktif!`);
+  const db = loadDB();
 
+  for (const messageId of Object.keys(db.giveaways)) {
+    scheduleGiveaway(messageId);
+  }
+
+  console.log(`${client.user.tag} aktif!`);
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -102,14 +210,14 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'cekilis-baslat') {
         const prize = interaction.options.getString('ödül');
-        const duration = interaction.options.getString('süre');
+        const durationInput = interaction.options.getString('süre');
         const winnersCount = interaction.options.getInteger('kazanan');
 
-        const durationMs = parseDuration(duration);
+        const durationMs = parseDuration(durationInput);
 
         if (!durationMs) {
           return interaction.reply({
-            content: '❌ Süre formatı hatalı. Örnek: `10m`, `2h`, `1d`',
+            content: '❌ Süre formatı hatalı. Örnek: `30m`, `1h23m`, `2d5h30m`, `45m20s`',
             ephemeral: true
           });
         }
@@ -121,12 +229,15 @@ client.on(Events.InteractionCreate, async interaction => {
           });
         }
 
-        const embed = createGiveawayEmbed({
+        const tempGiveaway = {
           prize,
           winnersCount,
-          duration,
-          participantsCount: 0
-        });
+          durationInput,
+          endTime: Date.now() + durationMs,
+          participants: [],
+          ended: false,
+          winners: []
+        };
 
         const button = new ButtonBuilder()
           .setCustomId('join_giveaway')
@@ -136,80 +247,32 @@ client.on(Events.InteractionCreate, async interaction => {
         const row = new ActionRowBuilder().addComponents(button);
 
         const message = await interaction.reply({
-          embeds: [embed],
+          embeds: [createGiveawayEmbed(tempGiveaway)],
           components: [row],
           fetchReply: true
         });
 
-        giveaways.set(message.id, {
-          prize,
-          duration,
-          winnersCount,
-          participants: new Set(),
-          channelId: interaction.channelId,
+        const db = loadDB();
+
+        db.giveaways[message.id] = {
+          ...tempGiveaway,
           messageId: message.id,
-          ended: false
-        });
+          channelId: interaction.channelId,
+          guildId: interaction.guildId
+        };
 
-        setTimeout(async () => {
-          const giveaway = giveaways.get(message.id);
-          if (!giveaway || giveaway.ended) return;
-
-          const channel = await client.channels.fetch(giveaway.channelId);
-          const participants = Array.from(giveaway.participants);
-
-          giveaway.ended = true;
-
-          const endedEmbed = createGiveawayEmbed({
-            prize: giveaway.prize,
-            winnersCount: giveaway.winnersCount,
-            duration: giveaway.duration,
-            participantsCount: participants.length,
-            ended: true
-          });
-
-          const disabledButton = new ButtonBuilder()
-            .setCustomId('join_giveaway')
-            .setLabel('Çekiliş Bitti')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true);
-
-          const disabledRow = new ActionRowBuilder().addComponents(disabledButton);
-
-          const giveawayMessage = await channel.messages.fetch(giveaway.messageId).catch(() => null);
-
-          if (giveawayMessage) {
-            await giveawayMessage.edit({
-              embeds: [endedEmbed],
-              components: [disabledRow]
-            });
-          }
-
-          if (participants.length === 0) {
-            await channel.send(`❌ **${giveaway.prize}** çekilişine kimse katılmadı.`);
-            giveaways.delete(message.id);
-            return;
-          }
-
-          const winners = pickWinners(participants, giveaway.winnersCount);
-
-          await channel.send(
-            `🎉 **Çekiliş Bitti!**\n\n` +
-            `🎁 Ödül: **${giveaway.prize}**\n` +
-            `👑 Kazananlar: ${winners.map(id => `<@${id}>`).join(', ')}`
-          );
-
-          giveaways.delete(message.id);
-        }, durationMs);
+        saveDB(db);
+        scheduleGiveaway(message.id);
 
         return;
       }
 
       if (interaction.commandName === 'cekilis-iptal') {
         const messageId = interaction.options.getString('mesaj_id');
-        const giveaway = giveaways.get(messageId);
+        const db = loadDB();
+        const giveaway = db.giveaways[messageId];
 
-        if (!giveaway) {
+        if (!giveaway || giveaway.ended) {
           return interaction.reply({
             content: '❌ Bu ID ile aktif çekiliş bulunamadı.',
             ephemeral: true
@@ -217,10 +280,15 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         giveaway.ended = true;
-        giveaways.delete(messageId);
+        saveDB(db);
 
-        const channel = await client.channels.fetch(giveaway.channelId);
-        const message = await channel.messages.fetch(messageId).catch(() => null);
+        if (timers.has(messageId)) {
+          clearTimeout(timers.get(messageId));
+          timers.delete(messageId);
+        }
+
+        const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
+        const message = channel ? await channel.messages.fetch(messageId).catch(() => null) : null;
 
         if (message) {
           const disabledButton = new ButtonBuilder()
@@ -231,9 +299,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
           const row = new ActionRowBuilder().addComponents(disabledButton);
 
-          await message.edit({
-            components: [row]
-          });
+          await message.edit({ components: [row] }).catch(() => {});
         }
 
         return interaction.reply(`❌ **${giveaway.prize}** çekilişi iptal edildi.`);
@@ -241,25 +307,27 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (interaction.commandName === 'cekilis-yeniden-cek') {
         const messageId = interaction.options.getString('mesaj_id');
-        const giveaway = giveaways.get(messageId);
+        const db = loadDB();
+        const giveaway = db.giveaways[messageId];
 
         if (!giveaway) {
           return interaction.reply({
-            content: '❌ Bu çekiliş aktif değil veya bot yeniden başlatılmış olabilir.',
+            content: '❌ Bu ID ile çekiliş bulunamadı.',
             ephemeral: true
           });
         }
 
-        const participants = Array.from(giveaway.participants);
-
-        if (participants.length === 0) {
+        if (giveaway.participants.length === 0) {
           return interaction.reply({
             content: '❌ Bu çekilişte katılımcı yok.',
             ephemeral: true
           });
         }
 
-        const winners = pickWinners(participants, giveaway.winnersCount);
+        const winners = pickWinners(giveaway.participants, giveaway.winnersCount);
+
+        giveaway.winners = winners;
+        saveDB(db);
 
         return interaction.reply(
           `🎉 **Yeniden çekiliş yapıldı!**\n\n` +
@@ -271,7 +339,9 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isButton()) {
       if (interaction.customId === 'join_giveaway') {
-        const giveaway = giveaways.get(interaction.message.id);
+        const messageId = interaction.message.id;
+        const db = loadDB();
+        const giveaway = db.giveaways[messageId];
 
         if (!giveaway || giveaway.ended) {
           return interaction.reply({
@@ -280,24 +350,18 @@ client.on(Events.InteractionCreate, async interaction => {
           });
         }
 
-        if (giveaway.participants.has(interaction.user.id)) {
+        if (giveaway.participants.includes(interaction.user.id)) {
           return interaction.reply({
             content: '❌ Zaten bu çekilişe katıldın.',
             ephemeral: true
           });
         }
 
-        giveaway.participants.add(interaction.user.id);
-
-        const updatedEmbed = createGiveawayEmbed({
-          prize: giveaway.prize,
-          winnersCount: giveaway.winnersCount,
-          duration: giveaway.duration,
-          participantsCount: giveaway.participants.size
-        });
+        giveaway.participants.push(interaction.user.id);
+        saveDB(db);
 
         await interaction.message.edit({
-          embeds: [updatedEmbed]
+          embeds: [createGiveawayEmbed(giveaway)]
         });
 
         return interaction.reply({
@@ -320,8 +384,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
 deployCommands();
 client.login(process.env.TOKEN);
-
-// RENDER KEEP ALIVE SERVER
 
 const app = express();
 
