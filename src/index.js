@@ -186,7 +186,7 @@ async function deployCommands() {
 }
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
+client.once(Events.ClientReady, () => {
 client.user.setPresence({
   activities: [{
     name: '🎉 Managing giveaways & rewards',
