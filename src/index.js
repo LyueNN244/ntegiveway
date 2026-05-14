@@ -84,7 +84,17 @@ async function deployCommands() {
 }
 
 client.once(Events.ClientReady, () => {
+
+  client.user.setPresence({
+    activities: [{
+      name: '🎉 Hosting NTE giveaways',
+      type: 0
+    }],
+    status: 'online'
+  });
+
   console.log(`${client.user.tag} aktif!`);
+
 });
 
 client.on(Events.InteractionCreate, async interaction => {
