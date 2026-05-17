@@ -1,8 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
 
 const {
   Client,
@@ -22,20 +21,22 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const dbPath = path.join(__dirname, '..', 'database.json');
 const timers = new Map();
 
-function loadDB() {
-  if (!fs.existsSync(dbPath)) {
-    fs.writeFileSync(dbPath, JSON.stringify({ giveaways: {} }, null, 2));
-  }
+const giveawaySchema = new mongoose.Schema({
+  messageId: String,
+  channelId: String,
+  guildId: String,
+  prize: String,
+  winnersCount: Number,
+  durationInput: String,
+  endTime: Number,
+  participants: [String],
+  ended: Boolean,
+  winners: [String]
+});
 
-  return JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-}
-
-function saveDB(db) {
-  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
-}
+const Giveaway = mongoose.model('Giveaway', giveawaySchema);
 
 function parseDuration(input) {
   const regex = /(\d+)(d|h|m|s)/gi;
@@ -83,7 +84,7 @@ function createGiveawayEmbed(giveaway, ended = false) {
   const remaining = Math.max(giveaway.endTime - Date.now(), 0);
 
   return new EmbedBuilder()
-    .setTitle(ended ? '🎉 Çekiliş Sona Erdi!' : '🎉 NTE Türkiye Çekilişi!')
+    .setTitle(ended ? '🎉 Çekiliş Sona Erdi!' : '🎉 Lunexa Çekilişi!')
     .setDescription(
       `🎁 **Ödül:** ${giveaway.prize}\n\n` +
       `👑 **Kazanan Sayısı:** ${giveaway.winnersCount}\n\n` +
@@ -92,7 +93,7 @@ function createGiveawayEmbed(giveaway, ended = false) {
       (ended ? 'Çekiliş tamamlandı.' : 'Katılmak için aşağıdaki butona bas!')
     )
     .setColor(ended ? 'Green' : 'Purple')
-    .setFooter({ text: 'NTE Türkiye Giveaway' })
+    .setFooter({ text: 'Lunexa • Powered by Nythera Systems' })
     .setTimestamp();
 }
 
@@ -101,8 +102,7 @@ function pickWinners(participants, count) {
 }
 
 async function endGiveaway(messageId) {
-  const db = loadDB();
-  const giveaway = db.giveaways[messageId];
+  const giveaway = await Giveaway.findOne({ messageId });
 
   if (!giveaway || giveaway.ended) return;
 
@@ -130,7 +130,7 @@ async function endGiveaway(messageId) {
 
   if (giveaway.participants.length === 0) {
     await channel.send(`❌ **${giveaway.prize}** çekilişine kimse katılmadı.`);
-    saveDB(db);
+    await giveaway.save();
     return;
   }
 
@@ -143,19 +143,18 @@ async function endGiveaway(messageId) {
     `👑 Kazananlar: ${winners.map(id => `<@${id}>`).join(', ')}`
   );
 
-  saveDB(db);
+  await giveaway.save();
 }
 
-function scheduleGiveaway(messageId) {
-  const db = loadDB();
-  const giveaway = db.giveaways[messageId];
+async function scheduleGiveaway(messageId) {
+  const giveaway = await Giveaway.findOne({ messageId });
 
   if (!giveaway || giveaway.ended) return;
 
   const remaining = giveaway.endTime - Date.now();
 
   if (remaining <= 0) {
-    endGiveaway(messageId);
+    await endGiveaway(messageId);
     return;
   }
 
@@ -175,7 +174,7 @@ async function deployCommands() {
     console.log('Slash komutları yükleniyor...');
 
     await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      Routes.applicationCommands(process.env.CLIENT_ID),
       { body: commands }
     );
 
@@ -186,18 +185,24 @@ async function deployCommands() {
 }
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-client.once(Events.ClientReady, () => {
-client.user.setPresence({
-  activities: [{
-    name: '🎉 Managing giveaways & rewards',
-    type: 0
-  }],
-  status: 'online'
-});
-  const db = loadDB();
 
-  for (const messageId of Object.keys(db.giveaways)) {
-    scheduleGiveaway(messageId);
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('MongoDB bağlandı!'))
+  .catch(err => console.error('MongoDB bağlantı hatası:', err));
+
+client.once(Events.ClientReady, async () => {
+  client.user.setPresence({
+    activities: [{
+      name: '🎉 Managing giveaways & rewards',
+      type: 0
+    }],
+    status: 'online'
+  });
+
+  const activeGiveaways = await Giveaway.find({ ended: false });
+
+  for (const giveaway of activeGiveaways) {
+    await scheduleGiveaway(giveaway.messageId);
   }
 
   console.log(`${client.user.tag} aktif!`);
@@ -250,25 +255,20 @@ client.on(Events.InteractionCreate, async interaction => {
           fetchReply: true
         });
 
-        const db = loadDB();
-
-        db.giveaways[message.id] = {
+        const giveaway = await Giveaway.create({
           ...tempGiveaway,
           messageId: message.id,
           channelId: interaction.channelId,
           guildId: interaction.guildId
-        };
+        });
 
-        saveDB(db);
-        scheduleGiveaway(message.id);
-
+        await scheduleGiveaway(giveaway.messageId);
         return;
       }
 
       if (interaction.commandName === 'cekilis-iptal') {
         const messageId = interaction.options.getString('mesaj_id');
-        const db = loadDB();
-        const giveaway = db.giveaways[messageId];
+        const giveaway = await Giveaway.findOne({ messageId });
 
         if (!giveaway || giveaway.ended) {
           return interaction.reply({
@@ -278,7 +278,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         giveaway.ended = true;
-        saveDB(db);
+        await giveaway.save();
 
         if (timers.has(messageId)) {
           clearTimeout(timers.get(messageId));
@@ -305,8 +305,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (interaction.commandName === 'cekilis-yeniden-cek') {
         const messageId = interaction.options.getString('mesaj_id');
-        const db = loadDB();
-        const giveaway = db.giveaways[messageId];
+        const giveaway = await Giveaway.findOne({ messageId });
 
         if (!giveaway) {
           return interaction.reply({
@@ -325,7 +324,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const winners = pickWinners(giveaway.participants, giveaway.winnersCount);
 
         giveaway.winners = winners;
-        saveDB(db);
+        await giveaway.save();
 
         return interaction.reply(
           `🎉 **Yeniden çekiliş yapıldı!**\n\n` +
@@ -338,8 +337,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton()) {
       if (interaction.customId === 'join_giveaway') {
         const messageId = interaction.message.id;
-        const db = loadDB();
-        const giveaway = db.giveaways[messageId];
+        const giveaway = await Giveaway.findOne({ messageId });
 
         if (!giveaway || giveaway.ended) {
           return interaction.reply({
@@ -356,7 +354,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         giveaway.participants.push(interaction.user.id);
-        saveDB(db);
+        await giveaway.save();
 
         await interaction.message.edit({
           embeds: [createGiveawayEmbed(giveaway)]
@@ -386,7 +384,7 @@ client.login(process.env.TOKEN);
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('NTE Giveaway bot aktif!');
+  res.send('Lunexa giveaway bot aktif!');
 });
 
 const PORT = process.env.PORT || 3000;

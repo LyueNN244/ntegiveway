@@ -6,45 +6,35 @@ const commands = [
     .setDescription('Yeni çekiliş başlatır')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(option =>
-      option
-        .setName('ödül')
+      option.setName('ödül')
         .setDescription('Çekiliş ödülü')
-        .setRequired(true)
-    )
+        .setRequired(true))
     .addStringOption(option =>
-      option
-        .setName('süre')
-        .setDescription('Örnek: 10m, 2h, 1d')
-        .setRequired(true)
-    )
+      option.setName('süre')
+        .setDescription('Örnek: 30m, 1h23m, 2d5h30m')
+        .setRequired(true))
     .addIntegerOption(option =>
-      option
-        .setName('kazanan')
+      option.setName('kazanan')
         .setDescription('Kazanan sayısı')
-        .setRequired(true)
-    ),
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('cekilis-iptal')
     .setDescription('Aktif çekilişi iptal eder')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(option =>
-      option
-        .setName('mesaj_id')
+      option.setName('mesaj_id')
         .setDescription('Çekiliş mesaj ID')
-        .setRequired(true)
-    ),
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('cekilis-yeniden-cek')
     .setDescription('Çekiliş için yeniden kazanan seçer')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(option =>
-      option
-        .setName('mesaj_id')
+      option.setName('mesaj_id')
         .setDescription('Çekiliş mesaj ID')
-        .setRequired(true)
-    )
+        .setRequired(true))
 ].map(command => command.toJSON());
 
 module.exports = commands;
